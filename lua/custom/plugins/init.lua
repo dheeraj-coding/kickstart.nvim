@@ -4,11 +4,20 @@
 -- See the kickstart.nvim README for more information
 return {
   {
+    "FabijanZulj/blame.nvim",
+    lazy = false,
+    config = function()
+      require('blame').setup {}
+    end,
+  },
+  {
     'akinsho/toggleterm.nvim',
     version = '*',
     config = function()
-      require('toggleterm').setup {}
-      vim.api.nvim_set_keymap('n', '<C-t>', '<Cmd>:ToggleTerm<CR>', { noremap = true, silent = true })
+      require('toggleterm').setup {
+                direction = 'vertical',
+            }
+      vim.api.nvim_set_keymap('n', '<C-t>', '<Cmd>:ToggleTerm size=80 <CR>', { noremap = true, silent = true })
     end,
   },
   {
