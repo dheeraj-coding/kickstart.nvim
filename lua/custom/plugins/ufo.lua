@@ -39,6 +39,8 @@ local handler = function(virtText, lnum, endLnum, width, truncate)
   return newVirtText
 end
 
+local filetype_exclude = { 'help', 'alpha', 'dashboard', 'neo-tree', 'Trouble', 'lazy', 'mason' }
+
 local options = {
   open_fold_hl_timeout = 100,
   close_fold_kinds_for_ft = { default = { 'imports', 'comment' } },
@@ -56,6 +58,10 @@ local options = {
     },
   },
   provider_selector = function(_, filetype, buftype)
+    if vim.tbl_contains(filetype_exclude, filetype) then
+      return ''
+    end
+
     local function handleFallbackException(bufnr, err, providerName)
       if type(err) == 'string' and err:match 'UfoFallbackException' then
         return require('ufo').getFolds(bufnr, providerName)
@@ -78,7 +84,7 @@ local options = {
       end
   end,
   fold_virt_text_handler = handler,
-  filetype_exclude = { 'help', 'alpha', 'dashboard', 'neo-tree', 'Trouble', 'lazy', 'mason' },
+  filetype_exclude = filetype_exclude,
 }
 
 return {

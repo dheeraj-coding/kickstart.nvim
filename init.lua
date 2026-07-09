@@ -93,6 +93,13 @@ vim.g.maplocalleader = ' '
 -- Set to true if you have a Nerd Font installed and selected in the terminal
 vim.g.have_nerd_font = true
 
+vim.filetype.add({
+  extension = {
+    tf = 'terraform',
+    tfvars = 'terraform-vars',
+  },
+})
+
 -- [[ Setting options ]]
 -- See `:help vim.o`
 -- NOTE: You can change these options as you wish!
@@ -120,6 +127,13 @@ end)
 
 -- Enable break indent
 vim.o.breakindent = true
+
+-- Use four spaces when pressing Tab.
+vim.o.expandtab = true
+vim.o.tabstop = 4
+vim.o.softtabstop = 4
+vim.o.shiftwidth = 4
+vim.o.smartindent = true
 
 -- Save undo history
 vim.o.undofile = true
@@ -234,6 +248,8 @@ end
 local rtp = vim.opt.rtp
 rtp:prepend(lazypath)
 
+local treesitter_parsers = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' }
+
 -- [[ Configure and install plugins ]]
 --
 --  To check the current status of your plugins, run
@@ -247,7 +263,12 @@ rtp:prepend(lazypath)
 -- NOTE: Here is where you install your plugins.
 require('lazy').setup({
   -- NOTE: Plugins can be added with a link (or for a github repo: 'owner/repo' link).
-  'NMAC427/guess-indent.nvim', -- Detect tabstop and shiftwidth automatically
+  {
+    'NMAC427/guess-indent.nvim',
+    opts = {
+      auto_cmd = false,
+    },
+  },
 
   -- NOTE: Plugins can also be added by using a table,
   -- with the first argument being the link and the following
@@ -344,7 +365,9 @@ require('lazy').setup({
 
       -- Document existing key chains
       spec = {
+        { '<leader>d', group = '[D]iffview' },
         { '<leader>f', group = '[F]ind' },
+        { '<leader>g', group = '[G]it' },
         { '<leader>t', group = '[T]oggle' },
         { '<leader>h', group = 'Git [H]unk', mode = { 'n', 'v' } },
       },
@@ -661,6 +684,134 @@ require('lazy').setup({
       --  So, we create new capabilities with blink.cmp, and then broadcast that to the servers.
       local capabilities = require('blink.cmp').get_lsp_capabilities()
 
+      local uv = vim.uv or vim.loop
+
+      local function file_exists(path)
+        return path and uv.fs_stat(path) ~= nil
+      end
+
+      local function executable(path)
+        return path and path ~= '' and vim.fn.executable(path) == 1
+      end
+
+      local function dirname(path)
+        return vim.fn.fnamemodify(path, ':h')
+      end
+
+      local function prepend_path(path)
+        if path and path ~= '' and not vim.env.PATH:find(path, 1, true) then
+          vim.env.PATH = path .. ':' .. vim.env.PATH
+        end
+      end
+
+      local function find_go()
+        if executable(vim.env.GO) then
+          return vim.env.GO
+        end
+
+        local from_path = vim.fn.exepath 'go'
+        if executable(from_path) then
+          return from_path
+        end
+
+        local gvm_go = vim.fn.glob(vim.fn.expand '~/.gvm/gos/go*/bin/go', false, true)
+        table.sort(gvm_go, function(a, b)
+          return a > b
+        end)
+
+        for _, candidate in ipairs(gvm_go) do
+          if executable(candidate) then
+            return candidate
+          end
+        end
+      end
+
+      local function find_gopls()
+        if executable(vim.env.GOPLS) then
+          return vim.env.GOPLS
+        end
+
+        local from_path = vim.fn.exepath 'gopls'
+        if executable(from_path) and from_path:find('/.gvm/', 1, true) then
+          return from_path
+        end
+
+        local gvm_gopls = vim.fn.glob(vim.fn.expand '~/.gvm/pkgsets/go*/**/bin/gopls', false, true)
+        table.sort(gvm_gopls, function(a, b)
+          return a > b
+        end)
+
+        for _, candidate in ipairs(gvm_gopls) do
+          if executable(candidate) then
+            return candidate
+          end
+        end
+
+        local mason_gopls = vim.fn.stdpath 'data' .. '/mason/bin/gopls'
+        if executable(mason_gopls) then
+          return mason_gopls
+        end
+
+        if executable(from_path) then
+          return from_path
+        end
+
+        return 'gopls'
+      end
+
+      local go = find_go()
+      if go then
+        prepend_path(dirname(go))
+      end
+
+      local function bazel_gopackagesdriver(root_dir)
+        local repo_driver = root_dir .. '/tools/gopackagesdriver.sh'
+        if executable(repo_driver) then
+          return repo_driver
+        end
+
+        local global_driver = vim.fn.stdpath 'config' .. '/bin/bazel-gopackagesdriver.sh'
+        if executable(global_driver) then
+          return global_driver
+        end
+      end
+
+      local function configure_go_for_bazel(new_config, root_dir)
+        if not root_dir then
+          return
+        end
+
+        local is_bazel_workspace = file_exists(root_dir .. '/MODULE.bazel')
+          or file_exists(root_dir .. '/WORKSPACE')
+          or file_exists(root_dir .. '/WORKSPACE.bazel')
+
+        if not is_bazel_workspace then
+          return
+        end
+
+        local driver = bazel_gopackagesdriver(root_dir)
+        if not driver then
+          return
+        end
+
+        local repo_bazel = root_dir .. '/bin/bazel'
+        local bazel = executable(repo_bazel) and repo_bazel or vim.fn.exepath 'bazel'
+        if bazel == '' then
+          bazel = 'bazel'
+        end
+
+        new_config.cmd_env = vim.tbl_deep_extend('force', new_config.cmd_env or {}, {
+          BUILD_WORKSPACE_DIRECTORY = root_dir,
+          GOPACKAGESDRIVER = driver,
+          GOPACKAGESDRIVER_BAZEL = bazel,
+          PATH = root_dir .. '/bin:' .. vim.env.PATH,
+        })
+      end
+
+      vim.api.nvim_create_user_command('LspInfo', function()
+        vim.cmd 'checkhealth vim.lsp'
+      end, { desc = 'Open Neovim native LSP health' })
+
       -- Enable the following language servers
       --  Feel free to add/remove any LSPs that you want here. They will automatically be installed.
       --
@@ -670,9 +821,34 @@ require('lazy').setup({
       --  - capabilities (table): Override fields in capabilities. Can be used to disable certain LSP features.
       --  - settings (table): Override the default settings passed when initializing the server.
       --        For example, to see the options for `lua_ls`, you could go to: https://luals.github.io/wiki/settings/
+      local go_filetypes = { 'go', 'gomod', 'gowork', 'gotmpl' }
+      local go_root_markers = { 'MODULE.bazel', 'WORKSPACE.bazel', 'WORKSPACE', 'go.work', 'go.mod', '.git' }
+
       local servers = {
         -- clangd = {},
-        -- gopls = {},
+        gopls = {
+          cmd = { find_gopls() },
+          filetypes = go_filetypes,
+          root_markers = go_root_markers,
+          settings = {
+            gopls = {
+              workspaceFiles = {
+                '**/BUILD',
+                '**/BUILD.bazel',
+                '**/*.bzl',
+                '**/MODULE.bazel',
+                '**/WORKSPACE',
+                '**/WORKSPACE.bazel',
+              },
+              directoryFilters = {
+                '-bazel-bin',
+                '-bazel-out',
+                '-bazel-testlogs',
+                '-bazel-go',
+              },
+            },
+          },
+        },
         -- pyright = {},
         -- rust_analyzer = {},
         -- ... etc. See `:help lspconfig-all` for a list of all the pre-configured LSPs
@@ -681,7 +857,42 @@ require('lazy').setup({
         --    https://github.com/pmizio/typescript-tools.nvim
         --
         -- But for many setups, the LSP (`ts_ls`) will work just fine
-        -- ts_ls = {},
+        ts_ls = {},
+        terraformls = {
+          init_options = {
+            indexing = {
+              ignoreDirectoryNames = {
+                "node_modules",
+                ".pnpm",
+                ".turbo",
+                ".next",
+                "dist",
+                "build",
+                "coverage",
+              },
+              ignorePaths = {
+                "node_modules",
+                "**/node_modules",
+              },
+            },
+          },
+          on_attach = function(client)
+            client.server_capabilities.semanticTokensProvider = nil
+          end,
+          root_dir = function(bufnr, on_dir)
+            local root = vim.fs.root(bufnr, {
+              '.terraform',
+              '.terraform.lock.hcl',
+              'backend.tf',
+              'providers.tf',
+              'versions.tf',
+              'main.tf',
+              'variables.tf',
+              'variable.tf',
+            })
+            on_dir(root or vim.fs.dirname(vim.api.nvim_buf_get_name(bufnr)))
+          end,
+        },
         --
 
         lua_ls = {
@@ -699,6 +910,30 @@ require('lazy').setup({
           },
         },
       }
+
+      local function start_gopls(bufnr)
+        local root_dir = vim.fs.root(bufnr, go_root_markers)
+        if not root_dir then
+          return
+        end
+
+        local config = vim.tbl_deep_extend('force', {}, servers.gopls, {
+          name = 'gopls',
+          root_dir = root_dir,
+          capabilities = vim.tbl_deep_extend('force', {}, capabilities, servers.gopls.capabilities or {}),
+        })
+
+        configure_go_for_bazel(config, root_dir)
+        vim.lsp.start(config, { bufnr = bufnr })
+      end
+
+      vim.api.nvim_create_autocmd('FileType', {
+        group = vim.api.nvim_create_augroup('kickstart-gopls', { clear = true }),
+        pattern = go_filetypes,
+        callback = function(event)
+          start_gopls(event.buf)
+        end,
+      })
 
       -- Ensure the servers and tools above are installed
       --
@@ -721,18 +956,16 @@ require('lazy').setup({
 
       require('mason-lspconfig').setup {
         ensure_installed = {}, -- explicitly set to an empty table (Kickstart populates installs via mason-tool-installer)
-        automatic_installation = false,
-        handlers = {
-          function(server_name)
-            local server = servers[server_name] or {}
-            -- This handles overriding only values explicitly passed
-            -- by the server configuration above. Useful when disabling
-            -- certain features of an LSP (for example, turning off formatting for ts_ls)
-            server.capabilities = vim.tbl_deep_extend('force', {}, capabilities, server.capabilities or {})
-            require('lspconfig')[server_name].setup(server)
-          end,
-        },
+        automatic_enable = false,
       }
+
+      for server_name, server in pairs(servers) do
+        if server_name ~= 'gopls' then
+          server.capabilities = vim.tbl_deep_extend('force', {}, capabilities, server.capabilities or {})
+          vim.lsp.config(server_name, server)
+          vim.lsp.enable(server_name)
+        end
+      end
     end,
   },
 
@@ -756,7 +989,7 @@ require('lazy').setup({
         -- Disable "format_on_save lsp_fallback" for languages that don't
         -- have a well standardized coding style. You can add additional
         -- languages here or re-enable it for the disabled ones.
-        local disable_filetypes = { c = true, cpp = true }
+        local disable_filetypes = { c = true, cpp = true, typescript = true, typescriptreact = true }
         if disable_filetypes[vim.bo[bufnr].filetype] then
           return nil
         else
@@ -940,22 +1173,26 @@ require('lazy').setup({
   },
   { -- Highlight, edit, and navigate code
     'nvim-treesitter/nvim-treesitter',
-    build = ':TSUpdate',
-    main = 'nvim-treesitter.configs', -- Sets main module to use for opts
-    -- [[ Configure Treesitter ]] See `:help nvim-treesitter`
-    opts = {
-      ensure_installed = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' },
-      -- Autoinstall languages that are not installed
-      auto_install = true,
-      highlight = {
-        enable = true,
-        -- Some languages depend on vim's regex highlighting system (such as Ruby) for indent rules.
-        --  If you are experiencing weird indenting issues, add the language to
-        --  the list of additional_vim_regex_highlighting and disabled languages for indent.
-        additional_vim_regex_highlighting = { 'ruby' },
-      },
-      indent = { enable = true, disable = { 'ruby' } },
-    },
+    branch = 'main',
+    build = function()
+      if vim.fn.executable 'tree-sitter' == 1 then
+        require('nvim-treesitter').install(treesitter_parsers):wait(300000)
+      end
+    end,
+    config = function()
+      if vim.fn.executable 'tree-sitter' == 1 then
+        require('nvim-treesitter').install(treesitter_parsers)
+      end
+
+      vim.api.nvim_create_autocmd('FileType', {
+        callback = function(args)
+          local ok = pcall(vim.treesitter.start, args.buf)
+          if ok and vim.bo[args.buf].filetype ~= 'ruby' then
+            vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+          end
+        end,
+      })
+    end,
     -- There are additional nvim-treesitter modules that you can use to interact
     -- with nvim-treesitter. You should go explore a few and see what interests you:
     --
@@ -979,6 +1216,7 @@ require('lazy').setup({
   require 'kickstart.plugins.autopairs',
   require 'kickstart.plugins.neo-tree',
   require 'kickstart.plugins.gitsigns', -- adds gitsigns recommend keymaps
+  require 'kickstart.plugins.diffview',
 
   -- NOTE: The import below can automatically add your own plugins, configuration, etc from `lua/custom/plugins/*.lua`
   --    This is the easiest way to modularize your config.
@@ -1013,4 +1251,4 @@ require('lazy').setup({
 })
 
 -- The line beneath this is called `modeline`. See `:help modeline`
--- vim: ts=2 sts=2 sw=2 et
+-- vim: ts=4 sts=4 sw=4 et

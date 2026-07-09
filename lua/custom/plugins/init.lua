@@ -17,8 +17,17 @@ return {
       -- this file can contain specific instructions for your project
       instructions_file = 'avante.md',
       -- for example
-      provider = 'gemini',
+      provider = 'claude',
       providers = {
+        claude = {
+          endpoint = 'https://api.anthropic.com',
+          model = 'claude-opus-4-8',
+          api_key_name = 'ANTHROPIC_API_KEY',
+          timeout = 30000, -- Timeout in milliseconds
+          extra_request_body = {
+            max_tokens = 20480,
+          },
+        },
         gemini = {
           endpoint = 'https://generativelanguage.googleapis.com/v1beta/models',
           model = 'gemini-3.1-flash-lite-preview',
@@ -31,6 +40,16 @@ return {
         },
       },
     },
+    config = function(_, opts)
+      require('avante').setup(opts)
+      -- Claude Opus 4.8 rejects the `temperature` param, but avante deep-merges
+      -- a default (0.75) into the claude provider that opts can't remove. Strip
+      -- it from the resolved/cached provider so it's never sent.
+      local claude = require('avante.providers').claude
+      if claude and claude.extra_request_body then
+        claude.extra_request_body.temperature = nil
+      end
+    end,
     dependencies = {
       'nvim-lua/plenary.nvim',
       'MunifTanjim/nui.nvim',
