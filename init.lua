@@ -248,7 +248,7 @@ end
 local rtp = vim.opt.rtp
 rtp:prepend(lazypath)
 
-local treesitter_parsers = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' }
+local treesitter_parsers = { 'bash', 'c', 'diff', 'go', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' }
 
 -- [[ Configure and install plugins ]]
 --
@@ -548,6 +548,23 @@ require('lazy').setup({
       vim.api.nvim_create_autocmd('LspAttach', {
         group = vim.api.nvim_create_augroup('kickstart-lsp-attach', { clear = true }),
         callback = function(event)
+          -- Don't let language servers stay attached to non-file buffers such as
+          -- diffview:// git-blob views (also fugitive://, gitsigns://, etc.). Those
+          -- hold content that isn't on disk, so definition/reference/hover requests
+          -- against their URIs make the server return a JSON-RPC error. Navigation
+          -- still works normally on the real working-tree side of a diff.
+          local bufname = vim.api.nvim_buf_get_name(event.buf)
+          local scheme = bufname:match '^(%w[%w+.-]*)://'
+          if scheme and scheme ~= 'file' then
+            local client_id = event.data.client_id
+            vim.schedule(function()
+              if vim.api.nvim_buf_is_valid(event.buf) then
+                vim.lsp.buf_detach_client(event.buf, client_id)
+              end
+            end)
+            return
+          end
+
           -- NOTE: Remember that Lua is a real programming language, and as such it is possible
           -- to define small helper and utility functions so you don't have to repeat yourself.
           --
@@ -568,6 +585,10 @@ require('lazy').setup({
 
           -- Find references for the word under your cursor.
           map('grr', require('telescope.builtin').lsp_references, '[G]oto [R]eferences')
+
+          -- Find callers and callees for the function under your cursor.
+          map('gci', require('telescope.builtin').lsp_incoming_calls, '[G]oto [C]allers [I]ncoming')
+          map('gco', require('telescope.builtin').lsp_outgoing_calls, '[G]oto [C]allees [O]utgoing')
 
           -- Jump to the implementation of the word under your cursor.
           --  Useful when your language has ways of declaring types without an actual implementation.
@@ -830,6 +851,15 @@ require('lazy').setup({
           cmd = { find_gopls() },
           filetypes = go_filetypes,
           root_markers = go_root_markers,
+          -- Neovim disables LSP file-watching by default on Linux. gopls
+          -- needs it to notice gazelle rewriting BUILD.bazel files (see
+          -- workspaceFiles below) — without it, new packages/files stay
+          -- invisible until gopls restarts.
+          capabilities = {
+            workspace = {
+              didChangeWatchedFiles = { dynamicRegistration = true },
+            },
+          },
           settings = {
             gopls = {
               workspaceFiles = {
@@ -932,6 +962,93 @@ require('lazy').setup({
         pattern = go_filetypes,
         callback = function(event)
           start_gopls(event.buf)
+        end,
+      })
+
+      -- In Bazel workspaces gopls resolves packages through the
+      -- gopackagesdriver, so a .go file that isn't listed in its package's
+      -- BUILD.bazel is invisible to gopls (no BUILD file at all for new
+      -- packages, missing from srcs for new files in existing packages).
+      -- On save, if the file isn't referenced by its BUILD.bazel, run
+      -- gazelle for that directory; the file-watch capability above lets
+      -- gopls pick up the BUILD change and load the package.
+      local gazelle_running = {}
+
+      local function build_file_references(build, fname)
+        if not file_exists(build) then
+          return false
+        end
+        local base = vim.fs.basename(fname)
+        for line in io.lines(build) do
+          if line:find('"' .. base .. '"', 1, true) then
+            return true
+          end
+        end
+        return false
+      end
+
+      local function gazelle_sync(bufnr)
+        local fname = vim.api.nvim_buf_get_name(bufnr)
+        if fname == '' then
+          return
+        end
+
+        local root_dir = vim.fs.root(bufnr, go_root_markers)
+        if not root_dir then
+          return
+        end
+
+        local is_bazel_workspace = file_exists(root_dir .. '/MODULE.bazel')
+          or file_exists(root_dir .. '/WORKSPACE')
+          or file_exists(root_dir .. '/WORKSPACE.bazel')
+        if not is_bazel_workspace then
+          return
+        end
+
+        local dir = vim.fs.dirname(fname)
+        local build = dir .. '/BUILD.bazel'
+        if build_file_references(build, fname) then
+          return
+        end
+
+        if gazelle_running[dir] then
+          return
+        end
+        gazelle_running[dir] = true
+
+        local build_existed = file_exists(build)
+        local rel = dir:sub(#root_dir + 2)
+        local repo_bazel = root_dir .. '/bin/bazel'
+        local bazel = executable(repo_bazel) and repo_bazel or 'bazel'
+
+        vim.system({ bazel, 'run', '//:gazelle', '--', rel }, { cwd = root_dir }, function(res)
+          vim.schedule(function()
+            gazelle_running[dir] = nil
+
+            if res.code ~= 0 then
+              vim.notify('gazelle failed for ' .. rel .. ':\n' .. (res.stderr or ''), vim.log.levels.WARN)
+              return
+            end
+
+            -- Belt and suspenders: notify gopls directly in case the
+            -- file watcher misses or debounces the BUILD change.
+            for _, client in ipairs(vim.lsp.get_clients { name = 'gopls' }) do
+              client:notify('workspace/didChangeWatchedFiles', {
+                changes = {
+                  { uri = vim.uri_from_fname(build), type = build_existed and 2 or 1 },
+                },
+              })
+            end
+            vim.notify('gazelle updated ' .. rel .. '/BUILD.bazel', vim.log.levels.INFO)
+          end)
+        end)
+      end
+
+      vim.api.nvim_create_autocmd('BufWritePost', {
+        group = vim.api.nvim_create_augroup('kickstart-gazelle', { clear = true }),
+        pattern = '*.go',
+        callback = function(event)
+          gazelle_sync(event.buf)
         end,
       })
 
@@ -1199,6 +1316,11 @@ require('lazy').setup({
     --    - Incremental selection: Included, see `:help nvim-treesitter-incremental-selection-mod`
     --    - Show your current context: https://github.com/nvim-treesitter/nvim-treesitter-context
     --    - Treesitter + textobjects: https://github.com/nvim-treesitter/nvim-treesitter-textobjects
+  },
+  {
+    'nvim-treesitter/nvim-treesitter-context',
+    dependencies = { 'nvim-treesitter/nvim-treesitter' },
+    opts = {},
   },
 
   -- The following comments only work if you have downloaded the kickstart repo, not just copy pasted the

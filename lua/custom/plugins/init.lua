@@ -17,8 +17,22 @@ return {
       -- this file can contain specific instructions for your project
       instructions_file = 'avante.md',
       -- for example
-      provider = 'claude',
+      provider = 'openai',
       providers = {
+        openai = {
+          endpoint = 'https://api.openai.com/v1',
+          model = 'gpt-5.6-sol',
+          api_key_name = 'AVANTE_OPENAI_API_KEY',
+          timeout = 30000, -- Timeout in milliseconds
+          use_response_api = true,
+          -- Replay the complete tool-call history on every Responses API request.
+          -- This keeps nested dispatch_agent loops isolated from the parent loop.
+          support_previous_response_id = false,
+          extra_request_body = {
+            reasoning_effort = 'medium',
+            max_completion_tokens = 20480,
+          },
+        },
         claude = {
           endpoint = 'https://api.anthropic.com',
           model = 'claude-opus-4-8',
@@ -42,6 +56,19 @@ return {
     },
     config = function(_, opts)
       require('avante').setup(opts)
+      -- Avante stores one Responses API ID on the shared OpenAI provider. A
+      -- dispatch_agent sub-loop can overwrite the parent's ID, which makes old
+      -- tool outputs look unmatched. Force full, paired history replay instead.
+      -- Responses reasoning and all tools remain enabled.
+      local openai = require('avante.providers').openai
+      if not openai._manual_response_replay_fix then
+        local original_parse_curl_args = openai.parse_curl_args
+        openai.parse_curl_args = function(self, prompt_opts)
+          self.last_response_id = nil
+          return original_parse_curl_args(self, prompt_opts)
+        end
+        openai._manual_response_replay_fix = true
+      end
       -- Claude Opus 4.8 rejects the `temperature` param, but avante deep-merges
       -- a default (0.75) into the claude provider that opts can't remove. Strip
       -- it from the resolved/cached provider so it's never sent.
